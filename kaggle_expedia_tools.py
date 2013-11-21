@@ -10,7 +10,18 @@ import pprint
 
 
 
-def trainer(train_df, col_list, model = None, train_loc1 = 7000014, train_loc2 = 9000007, cv_loc1 = 9000008, cv_loc2 = 9917530, print_factors = True):
+def trainer(train_df, col_list, model = None, train_loc1 = 7000014, train_loc2 = 9000007, cv_loc1 = 9000008, cv_loc2 = 9917530, print_factors = True, return_model = False):
+    """
+    >>trainer(train_df, col_list, model = None, train_loc1 = 7000014, train_loc2 = 9000007, 
+              cv_loc1 = 9000008, cv_loc2 = 9917530, print_factors = True)
+    
+    Given pd.DataFrame of Expedia Personalized Search training data, 
+    [list of columns in DF to train on], and optionally a SciKitLearn model.  Fit the model to classify rows
+    based on "booking_bool" parameter (train on the rows train_loc1 to train_loc2 inclusive).  Calculate the NDCG 
+    on a validation sample (rows: cv_loc1 to cv_loc2).
+
+    Optionally print an ordered list of the column names and their "feature_importances" with print_factors.
+    """
     
     #exclude outlying prices for training.
     train_df = train_df.loc[(train_df['price_usd'] <= 2000.0) * (train_df['price_usd'] != 0.0)]
@@ -42,12 +53,17 @@ def trainer(train_df, col_list, model = None, train_loc1 = 7000014, train_loc2 =
  
 def ndcg_calc(train_df, pred_scores):
     """
+    >>ndcg_calc(train_df, pred_scores)
+       train_df: pd.DataFrame with Expedia Columns: 'srch_id', 'booking_bool', 'click_bool'
+       pred_scores: np.Array like vector of scores with length = num. rows in train_df
+       
+
     Calculate Normalized Discounted Cumulative Gain for a dataset is ranked with pred_scores (higher score = higher rank).
     If 'booking_bool' == 1 then that result gets 5 points.  If 'click_bool' == 1 then that result gets 1 point (except:
     'booking_bool' = 1 implies 'click_bool' = 1, so only award 5 points total).  
     
+    NDCG = DCG / IDCG
     DCG = Sum( (2 ** points - 1) / log2(rank_in_results + 1) )
-    The numerator is 31 for a booking and 1 for a click.
     IDCG = Maximum possible DCG given the set of bookings/clicks in the training sample.
     
     """
@@ -57,7 +73,7 @@ def ndcg_calc(train_df, pred_scores):
     logger = lambda x: math.log(x + 1, 2)
     eval_df['log_rank'] = eval_df.groupby(by = 'srch_id')['score'].rank(ascending = False).map(logger)
 
-    book_dcg = (eval_df['booking_bool'] * 31.0 / eval_df['log_rank']).sum()
+    book_dcg = (eval_df['booking_bool'] * 31.0 / eval_df['log_rank']).sum() #where 2 ** 5 - 1.0 = 31.0
     book_idcg = (31.0 * eval_df['booking_bool']).sum()
     
     click_dcg = (eval_df['click_bool'] * (eval_df['booking_bool'] == 0) / eval_df['log_rank']).sum()
@@ -77,7 +93,23 @@ def ndcg_calc(train_df, pred_scores):
 
 
 
-def df_from_query(training = True):
+def df_from_query(srch_start = 7000014, srch_end = 9917530, training = True):
+    """
+    >>df_from_query(srch_start = 7000014, srch_end = 9917530, training = True)
+    
+    Query local MySQL database, (see dbcon, below for permissions) to build a pd.DataFrame for training/testing.
+    
+    Several columns depend on summary statistics about Properties in the PropFactors/PropFactors7M tables in the
+    database.  The "7M" suffix denotes summary statistics from the first 7000013 rows which for training
+    are used with the latter ~3M rows. (This is to have these latter rows more closely resemble the test set, since some 
+    properties only appear a few times so the "booking_cnt" statistic is an overly strong signal if it includes 
+    information from the row that is being used for training.)  However for building the Test Set predictions, it
+    is better to use statistics from the entire training set.
+
+    Since some properties will appear in the training/test sets but not among the summary sets, columns that depend
+    on these statistics are set to zero.
+    
+    """
     
     dbcon = MySQLdb.connect('localhost', 'kaggler', 'expediapass', 'expedia')
 
@@ -111,6 +143,16 @@ def df_from_query(training = True):
 
 
 def agg_by_srch(train_df):
+    """
+    >>agg_by_srch(train_df)
+    
+    Given a training/testing dataset that includes the columns listed in cols_in below, calculate
+    new columns that normalize these values among the search in which they appear by dividing by
+    the mean (or median for 'price_usd' since it has higher variance).  i.e. given prop_location_score "j"
+    for search "i" return prop_location_score[i][j] / mean(prop_location_score[i])
+
+    """
+    
     cols_in = ['prop_location_score1', 
                'prop_location_score2', 
                'book_per_pcnt', 
@@ -171,9 +213,18 @@ def agg_by_srch(train_df):
 
 def test_pred_sorted(test_df, model, cols, regress = False):
     """
+    >>test_pred_sorted(test_df, model, cols, regress = False)
+        test_df: pd.DataFrame that contains columns listed in cols.
+        model: SciKitLearn model used for ranking.
+        cols: [list of strs] columns in test_df to send to model.
+        regress: BOOL, Regressor Model used, as opposed to Classifier.
+    
+    Return a pd.DataFrame that contains 'srch_id', and 'property_id' columns such that
+    the properties are listed in descending order of their model score within each search.
+    
     To save output use: test_out_df.to_csv("FILE OUT", index = False, cols = ['srch_id', 'prop_id'], header = ['SearchId','PropertyId'])
     """
-    if regress:
+    if regress_model:
         scores = model.predict(test_df[cols])
     else:
         scores = model.predict_proba(test_df[cols])[:, 1]
@@ -184,6 +235,12 @@ def test_pred_sorted(test_df, model, cols, regress = False):
 
 def loader_saver(model, cols, file_str = "test_preds_saved", regress_model = False):
     """
+    >>loader_saver(model, cols, file_str = "test_preds_saved", regress_model = False)
+        model: SciKitLearn model used for ranking.
+        cols: [list of strs] columns in test_df to send to model.
+        file_str: STRING, file name of test predictions to be saved.
+        regress_model: BOOL, Regressor Model used, as opposed to Classifier.
+    
     Trying to run the MySQL query to load the entire Test set was too memory intensive for my 4Gb machine, 
     so load and process the data in chunks.
 
