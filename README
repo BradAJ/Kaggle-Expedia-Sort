@@ -1,0 +1,121 @@
+By: Brad Jacobs 11/2013.
+
+Python and MySQL code written for entries to the 
+Kaggle-Expedia Hotel Personalized Search Competition:
+http://www.kaggle.com/c/expedia-personalized-sort
+
+MY KAGGLE PROFILE:
+http://www.kaggle.com/users/100540/bradaj
+
+
+
+CONTENTS:
+kaggle_expedia_tools.py : Python code for training/predicting Expedia data
+
+kaggle_expedia_ingest.sql : MySQL code to ingest data as well as aggregate
+			  statistics on the properties in the search results.
+
+
+
+DESCRIPTION:
+The Expedia Hotel contest goal was to predict which hotels a user 
+will click and/or book and to sort the hotels so that these properties
+appear first in the search results.  Models are evaluated with
+Normalized Discounted Cumulative Gain (5 points for a booking,
+1 point for a click).
+
+In the training data there are ~10M results from ~400k searches.  Roughly
+65% of the time a user clicked and booked one hotel from the search results,
+~29% have one click but don't book, ~4% (>1 click, 1 booking), ~2% (>1 click, 0 
+booking).  Thus this contest can be thought of as a classification problem 
+since almost 96% of the search results are neither clicked nor booked, so their 
+position amongst themselves is irrelevant to the evaluation criteria.
+
+My final entry uses probabilities derived from the SciKit Learn Random Forest
+Classifier package to assign scores for sorting the rankings of the hotels.
+The results on the test set were NDCG = 0.51, which ranked me 34th out of 337
+entries (winning entry had NDCG = 0.54).
+
+The code was written with the expectation that it would be used within
+a REPL (iPython), and it queries a MySQL database that houses the training
+and test data, as well as two smaller tables that hold summary statistics 
+for properties that are derived from the training data. 
+
+Assuming Python (tested on v 2.7) and MySQL (tested on v 5.8), along with
+the Python packages listed at the top of kaggle_expedia_tools.py are installed
+the steps in the following RECIPE should reproduce results similar to mine,
+NDCG around 0.514 when submitted to Kaggle (the randomness of the random forest
+will make it somewhat different).
+
+
+
+RECIPE:   
+1: Download train.csv and test.csv from:
+   http://www.kaggle.com/c/expedia-personalized-sort/data
+
+2: Run code in kaggle_expedia_ingest.sql in MySQL to build tables:
+   TrainSearch, TestSearch, PropFactors and PropFactors7M.
+
+3: In kaggle_expedia_tools.py find the line (around line 155): 
+   "dbcon = MySQLdb.connect('localhost', 'kaggler', 'expediapass', 'expedia')"
+   Update to your MySQL server, user, password, and database.
+
+4. Run kaggle_expedia_tools.py in a Python REPL (e.g. iPython).
+
+5. Loading data from the MySQL database is memory intensive.  On my laptop
+   loading 1M rows from the database required about 1 Gb of RAM, but once
+   loading is finished the corresponding DataFrame requires more like
+   100 Mb.  Therefore step 5A shows the sequence of Python calls required
+   where memory is not an issue.  5B uses some looping functions that load
+   and process the data in chunks, to avoid using more than ~2.5 Gb of RAM
+   (at least on my machine).  This low memory version took about 3.5 hrs
+   total to run to load, train, and output predictions on my laptop 
+   (MacBook Pro 2011, chip: Intel i5).
+
+5A.  Issue the following commands in the REPL:
+   
+train_df = df_from_query()
+agg_by_srch(train_df)   
+   
+#See Note 1 on rfc_model below.
+rfc_model = trainer(train_df, return_model = True, train_loc2 = 9917530)
+   
+test_df = df_from_query(training = False)
+   
+pred_df = test_pred_sorted(test_df, rfc_model)
+   
+#See Note2 on header below.
+pred_df.to_csv("ex_rfc_preds.csv", index = False, header = ['SearchId', 'PropertyId'], cols = ['srch_id', 'prop_id'])
+   
+
+5B.  On low memory machines (~4 Gb), run the following in the REPL,
+     they call the functions above, using roughly 1M rows at a time:
+   
+train_df = training_loader()
+agg_by_srch(train_df)
+   
+#See Note 1 on rfc_model below.
+rfc_model = trainer(train_df, return_model = True, train_loc2 = 9917530)
+   
+#To free up memory delete the training DataFrame, in iPython it is:
+%xdel train_df
+
+#See Note2 on header below.
+test_loader_saver(rfc_model, file_str = "ex_rfc_preds")
+
+#This creates six files that can be joined together on the command line:
+#cat ex_rfc_preds0.csv ex_rfc_preds1.csv ex_rfc_preds2.csv ex_rfc_preds3.csv ex_rfc_preds4.csv ex_rfc_preds5.csv > ex_rfc_preds_all.csv
+
+
+
+
+#Note 1: By default trainer() splits the data for training to include a 
+    validation set, so that NDCG can be estimated for the model.  In
+    the commands above ALL the training data is used to build the
+    Random Forest, so even though trainer() will print a NDCG
+    it will NOT be meaningful.
+
+#Note 2: The PANDAS to_csv method didn't use the SearchId,PropertyId 
+   header as expected (instead using the column names srch_id,prop_id), 
+   so this may need to be adjusted by hand to conform with Kaggle's 
+   requirements.
